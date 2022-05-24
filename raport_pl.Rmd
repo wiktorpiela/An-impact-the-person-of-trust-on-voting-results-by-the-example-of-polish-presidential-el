@@ -1,0 +1,795 @@
+---
+title: "Wpływ mężów zaufania na wyniki wyborów prezydenckich w 2020 roku"
+author: "Wiktor Piela"
+date:  24.05.2022
+output: github_document
+always_allow_html: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      message=FALSE, 
+                      warning=FALSE, 
+                      error=FALSE,
+                      fig.align = "center")
+
+library("tidyverse")
+library("readxl")
+library("ggridges")
+library("janitor")
+library("patchwork")
+library("kableExtra")
+
+setwd("C:/Users/wpiel/OneDrive/Desktop/maz_zaufania_projekt")
+source("func.R")
+ggthemr::ggthemr("flat dark")
+```
+
+```{r raw_data_processing, cache=TRUE, include=FALSE}
+#dane 1 tura
+tura1 <- prepare_results("wyniki_proc_1_tura.xlsx")
+
+tura1_maz <- prepare_trustee_data("maz_zaufania_1_tura.xlsx")
+
+tura1 <- left_join(tura1, tura1_maz, by = "klucz") 
+tura1 <- tura1[,c(13,3,6:12,14)]
+colnames(tura1)[6:ncol(tura1)] <- paste0(colnames(tura1)[6:ncol(tura1)],"_1")
+
+#dane 2 tura
+tura2 <- prepare_results("wyniki_gl_na_kand_po_obwodach_proc_utf8.xlsx")
+
+tura2_maz <- prepare_trustee_data("maz_zaufania.xlsx")
+
+tura2 <- left_join(tura2, tura2_maz, by = "klucz") 
+tura2 <- tura2[,c(13,9:12,14)]
+colnames(tura2)[2:ncol(tura2)] <- paste0(colnames(tura2)[2:ncol(tura2)],"_2")
+
+#populacja dane
+pop1 <- prepare_population_data("liczebnosc_1_tura.xlsx")
+pop2 <- prepare_population_data("liczebnosc.xlsx")
+
+populacja <- left_join(pop1,pop2,by="klucz") %>% 
+  rowwise() %>% 
+  mutate(populacja = mean(c(populacja.x,populacja.y))) %>% 
+  ungroup() %>% 
+  select(klucz,populacja)
+
+#zlaczenie w jedno
+
+wybory <- left_join(tura1,tura2, by="klucz")
+
+wybory <- left_join(wybory, populacja, by="klucz")
+
+#przyczyna niewaznych glosow + przeliczenie
+
+niewaz_1_przeliczone <-  convert_invalid_votes_1("wyniki_proc_1_tura.xlsx")
+
+niewaz_2_przeliczone <-  convert_invalid_votes_2("wyniki_gl_na_kand_po_obwodach_proc_utf8.xlsx") 
+
+niewazne <- left_join(niewaz_1_przeliczone,niewaz_2_przeliczone,by="klucz")
+
+wybory <- left_join(wybory,niewazne, by = "klucz")
+
+#wartości bezwzgledne wynikow kandydatów 
+wyniki1tura <- read_csv2("data/wyniki1tura.csv") %>% 
+  mutate(klucz = paste0(`Kod TERYT`,`Numer obwodu`)) %>% 
+  select(klucz,`Andrzej Sebastian DUDA`,`Rafał Kazimierz TRZASKOWSKI`)
+
+colnames(wyniki1tura)[2:3] <- paste0(colnames(wyniki1tura)[2:3],"_1b")
+
+wyniki2tura <- read_csv2("data/wyniki2tura.csv") %>% 
+  mutate(klucz = paste0(`Kod TERYT`,`Numer obwodu`)) %>% 
+  select(klucz,`Andrzej Sebastian DUDA`,`Rafał Kazimierz TRZASKOWSKI`)
+
+colnames(wyniki2tura)[2:3] <- paste0(colnames(wyniki2tura)[2:3],"_2b")
+
+wyniki_bezw <- left_join(wyniki1tura,wyniki2tura, by="klucz")
+
+wybory <- left_join(wybory,wyniki_bezw,by="klucz") %>% 
+  mutate(across(c(`Andrzej Sebastian DUDA_1b`,`Andrzej Sebastian DUDA_2b`,
+                  `Rafał Kazimierz TRZASKOWSKI_1b`,`Rafał Kazimierz TRZASKOWSKI_2b`),as.numeric))
+
+# wybory <- filter(wybory,`Typ obszaru`%in%c("miasto","wieś"))
+
+# dwie ramki danych
+typ_obszaru <- pull(distinct(wybory, `Typ obszaru`))[1:2]
+
+obszary <- list()
+
+for (x in 1:length(typ_obszaru)){
+  obszary[[x]] <- filter(wybory, `Typ obszaru` == typ_obszaru[x])
+}
+
+for (x in 1:length(obszary)){
+  if (x == 1){
+    obszary[[x]] <- obszary[[x]] %>%
+      group_by(Gmina) %>%
+      mutate(populacja = sum(populacja)) %>%
+      ungroup() %>%
+      mutate(kategoria = cut(populacja, breaks = c(0,2e+04, 1e+05, 5e+05,1e+07),
+                             labels = c("do 20k","pow. 20k-100k","pow. 100k-500k","pow. 500k")),
+             region = paste0(Województwo,"-",kategoria))
+  }
+  if (x==2){
+    obszary[[x]] <- obszary[[x]] %>%
+      group_by(Gmina) %>%
+      mutate(populacja = sum(populacja)) %>%
+      ungroup() %>% 
+      mutate(kategoria = cut(populacja, breaks = c(0,4000,6000,8000,30000),
+                             labels = c("do 4k", "pow. 4k-6k","pow. 6k-8k","pow. 8k")),
+             region = paste0(Województwo,"-",kategoria))
+  }
+  
+}
+```
+
+### Przedmiot badania
+
+Wybory prezydenckie w Polsce w 2020 roku wyróżniają się pod wieloma względami od innych tego typu wyborów mających miejsce w Polsce po roku 1989. Na tą wyjątkowość składają sie przede wszystkim poniższe fakty: 
+
+* bardzo mała róznica głosów pomiędzy kandydatami w rozstrzygającej 2 turze wyborów
+* wysoka frekwencja, jedna z najwyższych dotąd odnotowanych w Polsce (co świadczy o skutecznej mobilizacji elektoratu obu kandydatów)
+* duzy przyrost komisji odwiedzonych przez [męża zaufania](https://pl.wikipedia.org/wiki/M%C4%85%C5%BC_zaufania) pomiędzy pierwszą a drugą turą
+
+#### Szczegóły
+
+##### Niska przewaga zwycięzcy wyborów
+
+Dla porównania - w drugiej turze wyborów, [Andrzej Duda](https://pl.wikipedia.org/wiki/Andrzej_Duda) wygrał z ubiegającym sie o reelekcję [Bronisławem Komorowskim](https://pl.wikipedia.org/wiki/Bronis%C5%82aw_Komorowski) nieco ponad 500 tysiącami głosów, co stanowiło ponad 3 procent sumy wszystkich oddanych wówczas głosów. W 2020, [Rafał Trzaskowski](https://pl.wikipedia.org/wiki/Rafa%C5%82_Trzaskowski) przegrał o około 400 tysięcy głosów, co jest równowartością nieco ponad 2 procent wszystkich ważnych głosów. Widać zatem, że różnica istotnie stopaniała na niekorzyść konserwatywnego kandydata. 
+
+```{r}
+get_runoff_results() %>% 
+  select(-prop) %>% 
+  pivot_wider(names_from = kandydat,
+              values_from = `sum(wynik)`) %>% 
+  unite("KOMOROWSKI/TRZASKOWSKI", 
+        `Bronisław Maria KOMOROWSKI`:`Rafał Kazimierz TRZASKOWSKI`,
+        na.rm=TRUE) %>% 
+  mutate(`KOMOROWSKI/TRZASKOWSKI` = as.numeric(`KOMOROWSKI/TRZASKOWSKI`)) %>% 
+  mutate(`All votes`  = rowSums(.[2:3]),
+         `Duda's advantage` = `Andrzej Sebastian DUDA`-`KOMOROWSKI/TRZASKOWSKI`,
+         prop = `Duda's advantage`/`All votes`) %>% 
+  mutate(`Andrzej Sebastian DUDA` = format(`Andrzej Sebastian DUDA`, big.mark=" "),
+         `KOMOROWSKI/TRZASKOWSKI` = format(`KOMOROWSKI/TRZASKOWSKI`, big.mark=" "),
+         `All votes` = format(`All votes`, big.mark=" "),
+         `Duda's advantage` = format(`Duda's advantage`, big.mark=" "),
+         prop = paste0(round(prop*100,2),"%")) %>% 
+  rename(`Wybory (II tura)`="wybory",
+         `KOMOROWSKI/ \n TRZASKOWSKI`= "KOMOROWSKI/TRZASKOWSKI",
+         `Suma wszystkich głosów` = "All votes",
+         `Udział nadwyżki z głosach ogółem`="prop",
+         `Przewaga Andrzeja Dudy` = "Duda's advantage") %>% 
+  kable() %>% 
+  kable_material(c("striped", "hover"))
+```
+
+##### Wysoka frekwencja
+
+Frekwencja w 2 turze wyborów prezydenckich 2020 była więkasz o `r 68.18-55.34`  punktów procentowych w porównaniu z rokiem 2015. Oznacza to, że w 2020, zagłosowało o `r format(20458480 - 16742938, big.mark=" ")` osób niż 5 lat wczesniej.
+
+```{r, fig.align="center"}
+x <- c("2015","2020")
+y <- c(0.5534, 0.6818)
+  
+tibble(x,y) %>% 
+  ggplot(aes(x,y,fill=x))+
+  geom_col()+
+  scale_y_continuous(labels = scales::percent)+
+  geom_label(aes(label=paste0(round(y*100,2),"%")),show.legend = FALSE)+
+  labs(x = "Wybory",
+       y = "Frekwencja",
+       title = "Porównanie frekwencji 2 tury wyborów 2015 i 2020")+
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5))
+  
+```
+
+
+##### Obesność męzów zaufania
+
+Podczas pierwszej tury wyborów 2020, mężowie zaufania pojawili się w  `r trustee_comparison1(wybory)$n[2]` komisjach wyborczych, natomiast 2 tygodnie póxniej, podczas drugiej tury, było już `r trustee_comparison1(wybory)$n[4]` komisji odwiedzonych przez męża zaufania. To oznacza, że pomiędzy pierwszą a drugą turą przyrosło `r trustee_comparison1(wybory)$n[4]-trustee_comparison1(wybory)$n[2]` takich komisji w skali całego kraju.
+
+```{r, fig.align='center'}
+trustee_comparison1(wybory) %>% 
+  rename(Round = "tura",
+         `Visit of the person of trust` = "obecnosc") %>% 
+  mutate(Round = ifelse(Round == "maz_1", "1 tura","2 tura"),
+         `Visit of the person of trust` = ifelse(`Visit of the person of trust`=="0","Nie","Tak")) %>% 
+  ggplot(aes(`Visit of the person of trust`,prop,fill=`Visit of the person of trust`))+
+  geom_col(position="dodge2")+
+  scale_y_continuous(labels = scales::percent)+
+  facet_wrap(vars(Round))+
+  geom_label(aes(label=paste0(round(prop*100,2),"%")),show.legend = FALSE)+
+  labs(y="Odsetek komisji",
+       title = "W ilu komisjach pojawił się mąż zaufania w 2020?",
+       fill = "Czy obeność męża zaufania?")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+### Cel badania
+
+Wybory prezydenckie w 2020 r. w ostatecznej turze zakończyły się małą różnicą przewagi pomiędzy ubiegającym się o reelekcję Andrzejem Dudą a Rafałem Trzaskowskim. W ich trakcie odnotowano niespotykany wcześniej w historii polskich wyborów przyrost liczby mężów zaufania, sprawujących kontrolę nad rzetelnym przeprowadzeniem wyborów.  Celem niniejszych badań było sprawdzenie, czy obecność mężów zaufania mogła mieć wpływ na ich finalny rezultat. Jeśli tak, to czy w takim razie warto, dla dobra przyszłych wyborów, popularyzować tą funkcję społeczną na szersza skalę.
+
+### Założenia do badania
+
+Dysponując wynikami wyborów z obu tur z ponad 27 tysięcy komisji obwodowych w całej Polsce i za granicą, nalezy wybrać populację badawczą, czyli reprezentacyjny zbiór oberwacji, na którym przeprowadzi się badanie. W pierwszej kolejności do badania selekcjonuje się te mające charakter stały (czyli pomija się w tym kroku komisje wyborcze w aresztach i więzieniach, domach pomocy społecznej, na statkach i za granicą). Powód takiego doboru populacji do badania wynika wprost z intuicji – wyniki pochodzące ze specjalnych obwodów wyborczych wydzielonych w ww. miejscach cechuje brak reprezentatywności, praktycznie zawsze odróżniają się w sposób znaczny od stałych komisji, gdzie głosuje całe społeczeństwo, a nie tylko jego część, posiadająca określone cechy, co bezpośrednio przekłada się na wyniki wyborcze tam osiągane. Zatem odrzucenie takich obserwacji wydaje się niezbędne, jeżeli chce się wyciągnąć z analizy wnioski niezaburzone odstającymi obserwacjami.
+
+Dodatkowo - w zbiorze danych istnieje podział na cztery typy obszarów - miasto, wieś, obszary miejsko- wiejskie oraz dzielnice Warszawy. Do badania zostaną wykorzystane obserwacje z miast i wsi, ponieważ wśród tych rodzajów jest najwięcej obserwacji, a ponadto, jak wprost wynika z intuicji oraz historii wyborów - mieszańcy obu obszarów cechuje co do zasady odmienna preferacja polityczna. 
+
+### Inferencja przy pomocy parametrów regresji liniowej wielu zmiennych
+
+Udzielenie odpowiedzi na wyżej postawione pytanie, czy obeność męża zaufania w komisji podczas głosowania faktycznie wpływa na wynik wyborów, nie jest prosta. Mamy jednak do dyspozycji sporo zmiennych, głównie ilościowych, opisujących każdą obserwację: oficjalne wyniki każdego z kandydatów, wartość frekwencji oraz odsetek nieważnych głosów, a dodatkowo: dane o położeniu geograficznym komisji, liczbie ludności zamieszkujących gminę, w której znajduje się dana komisja oraz czy gmina ta jest miejska czy też wiejska. Szukalibyśmy zatem odpowiedzi na pytanie, jak na wynik konkretnego kandydata wplywały wymienione czynniki, a miedzy innymi obeność męża zaufania podczas głosowania. Problem jest dość złożony, a wiennych wiele - zatem z pomocą mogłaby przyjść regresja liniowa wielu zmiennych, a dzięki parametrom i istotności statystycznej każdego z predykotów, będzie można ocenić, czy dostarczone do modelu dane wskazują na wpływ obeności męża zaufania na wynik któregoś z kandydatów, oczywiścio wobec innych istotnych statycznie zmiennych. 
+
+*Nie będzie analizowany błąd, dane też nie zostaną podzielone za zbiory testowy i treningowy, ponieważ model ma za zadanie jedynie wskazać czy wartości parametrów są zgodne z intuicją oraz czy zostania wykazana pewna prawidłowość odnośnie obeności męża zaufania w komisji.
+
+Użyte zostaną wyniki II tury wyborów ze zbioru wskazanego w założeniach. Niech zmienną zależną będzie przewaga Andrzeja Dudy nad Rafałem Trzaskowskim w punktach procentowych, natomiast predyktorami - wojwództwo i typ obszaru w jakim mieści się dana komisja (dane o położeniu geograficznym), a także wynik frekwencji w II turze, odsetek głosów nieważnych z powodu zostawienia więcej niż jednego znaku "X" przy na karcie oraz obeność męża zaufania w komisji.
+
+```{r}
+do_modelu <- wybory %>% 
+  mutate(`Przewaga Andrzeja DUDY tura 2`= `Andrzej Sebastian DUDA_2` - `Rafał Kazimierz TRZASKOWSKI_2`,
+         maz_2 = fct_recode(maz_2,
+                            NIE = "0",
+                            TAK = "Other")) %>%
+  filter(`Typ obszaru`%in%c("miasto","wieś"))
+
+model <- lm(`Przewaga Andrzeja DUDY tura 2`~ `Typ obszaru`+Województwo+Frekwencja_2+x2_2+maz_2,
+   data = do_modelu)
+
+summary(model)
+```
+Z tego powodu, że sprawa jest uproszona, a stworzony model jedynie wskazówką do dalszego badania, w tym momencie jedyną interesującą nas metryką będzie współczynnik determinacji modelu mówiący o tym jak model jest dopasowany do danych i jakim stopniu model wyjaśnia badane zjawisko. W tym przypadku wynosi on `r round(summary(model)$r.squared,2)` z przedziału od 0 do 1, czyli można powiedzieć, że bez dodatkowych modyfikacji oraz tworzenia dodatkowych cech model dobrze dopasował się do danych i wyjaśnia ok. 63 proc. zmienności, a także że jego parametry są interpretowalne.
+
+### Pierwsze spostrzeżenia
+
+Współczynniki regresji odpowiedające poszczególnym zmiennym są zgodne z intuicją oraz wiedzą jaką mamy z wyników poprzednich wyborów. Warto zwrócić uwagę na to, gdzie partie konserwatywne uzyskują zazwyczaj najwyższe poparcie - są to przede wszystkim obszary wschodniej Polski - tak też, wartości wspołczynników przy takich województwach jak np. podkarpackie, podlaskie czy świętokrzyskie mają dużą wartość dodatnią, co świadczy o tym, że przeciętnie Andrzej Duda uzyskiwał tam dużo wyższą przewagę nad Rafałem Trzaskowskim. Z kolei, w wojwództwach zachodniopomorskim, pomorskim, opolskim i lubuskim parametry mają wartości ujemne, co sugeruje brak przewago kandaydata konserwatywnego na tych obszarach. Analogicznie w przypadku wsi - jeżeli obszar komisji to wieś, Duda uzyskuje tam bardzo wysoką przewagę nad kandydatem liberalnym. Ponadto, prawie wszystkie zmienne są istotne statystycznie (im t value jest bardziej różne od zera, tym bardziej istotna jest zmienna), co oznacza, że z wysokim prawdopodobieństem można stwierdzić, że mają one wpływ na wartość zmiennej zależnej.
+
+Estymacja parametrów tego modelu wskazuje, że obecność męża zaufania jest istotna statystycznie i wpływa na niekorzyść Andrzeja Dudy - ponieważ średnio jeżeli w danej komisji był mąż zaufania w 2 turze, to ubiegający się o reelekcję prezydent uzyskiwał niższą o prawie 5 pp. przewagę nad przeciwnikiem. Czy można zatem powiedzieć, że obecność męża zaufania wpłyneła na wynik wyborów, ponieważ dzięki temu unikęto nieuczciwych praktyk mających na celu wypromowanie którego z kandydatów ? 
+
+### Dlaczego ten model jest zły?
+
+Istotny jest tutaj związek przyczynowo-skutkowy i należy rozważyć dwie sytuacje:
+
+* obeność męża zaufania zadziałała na korzyść wyniku Trzaskowskiego, ponieważ zaniechano ewentualnych nadużyć
+* więcej było mężów zaufania tam, gdzie Trzaskowski ma wyższe poparcie, bo elektorat liberalny bardziej obawiał się potencjalnych nadużyć
+
+Sama intuicja i podstawowa wiedza na temat polskiego życia politycznego ostatnich lat każe obstać za drugą opcją. Dane ukazują nastepujące zależności:
+
+```{r}
+ggplot(do_modelu,aes(maz_2, `Przewaga Andrzeja DUDY tura 2`, fill=maz_2))+
+  geom_boxplot()+
+  stat_summary(fun.y="mean", color="red")+
+  facet_wrap(vars(`Typ obszaru`), scales="free")+
+  labs(x = "Obeność męża zaufania w komisji",
+       y = "Przewaga Andrzeja DUDY tura 2 - pp.",
+       title = "Przewaga Dudy w pp. a obeność męża zaufania")+
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5))
+
+
+do_modelu %>% 
+  filter(`Typ obszaru`=="wieś") %>% 
+  mosaic::favstats(`Przewaga Andrzeja DUDY tura 2`~maz_2, data=.)
+
+do_modelu %>% 
+  filter(`Typ obszaru`=="miasto") %>% 
+  mosaic::favstats(`Przewaga Andrzeja DUDY tura 2`~maz_2, data=.)
+
+```
+
+Na wsiach, w komisjach, gdzie w 2 turze nie było mężów zaufania, przewaga Dudy nad Trzaskowskim wynosiła przeciętnie prawie 36 pp., natomiast tam, dzie ich nie było - ta przewaga była równa przeciętnie już około 31 pp. Analogicznie jeśli chodzi o miasta - Duda tracił do Trzaskowskiego średnio 7.15 pp. w komisjach bez męża zaufania, ale tam gdzie się on pojawił, różnica wyniosła ponad 13 pp. straty do liberalnego kandydata. 
+
+Dodatkowo, takiej zależności, można dowodzić w podobnym ujęciu:
+
+```{r}
+do_modelu %>% 
+    mutate(wygrany = ifelse(`Rafał Kazimierz TRZASKOWSKI_2`>`Andrzej Sebastian DUDA_2`,"TRZASKOWSKI","DUDA"),
+         maz_2 = ifelse(maz_2=="NIE","NIEOBECNY","OBECNY")) %>%
+  tabyl(wygrany, maz_2) %>% 
+  adorn_percentages(denominator = "col") %>% 
+  adorn_pct_formatting(digits=2) %>% 
+  kable(full_width = FALSE) %>%
+  kable_material(c("striped", "hover")) %>% 
+  add_header_above(c("","Cała Polska",""))
+```
+W skali całej Polski, w drugiej turze Rafał Trzaskowski wygrał w tylko nieco ponad co trzeciej komisji, gdzie mąż zaufania podczas drugiej tury nie pojawił się. W przypadku komisji przez niego odwiedzonych, Trzaskowski wygrywał w ponad połowie.
+
+Analogicznie w rozbiciu na wsie i miasta - jeśli mielibysmy wskazać, gdzie Trzaskowski wygra z wiekszym prawdopodobieństwem, zawsze odpowiedż pada na komisję z mężem zaufania. 
+
+```{r}
+do_modelu %>%
+  filter(`Typ obszaru`=="wieś") %>%
+    mutate(wygrany = ifelse(`Rafał Kazimierz TRZASKOWSKI_2`>`Andrzej Sebastian DUDA_2`,"TRZASKOWSKI","DUDA"),
+         maz_2 = ifelse(maz_2=="NIE","NIEOBECNY","OBECNY")) %>%
+  tabyl(wygrany, maz_2) %>%
+  adorn_percentages(denominator = "col") %>%
+  adorn_pct_formatting(digits=2) %>% 
+  kable(full_width = FALSE) %>%
+  kable_material(c("striped", "hover")) %>% 
+  add_header_above(c("","Obszary wiejskie",""))
+```
+
+```{r}
+do_modelu %>%
+  filter(`Typ obszaru`=="miasto") %>%
+    mutate(wygrany = ifelse(`Rafał Kazimierz TRZASKOWSKI_2`>`Andrzej Sebastian DUDA_2`,"TRZASKOWSKI","DUDA"),
+         maz_2 = ifelse(maz_2=="NIE","NIEOBECNY","OBECNY")) %>%
+  tabyl(wygrany, maz_2) %>%
+  adorn_percentages(denominator = "col") %>%
+  adorn_pct_formatting(digits=2) %>% 
+  kable(full_width = FALSE) %>%
+  add_header_above(c("","Miasta",""))
+```
+
+```{r}
+do_modelu %>%
+    mutate(wygrany = ifelse(`Rafał Kazimierz TRZASKOWSKI_2`>`Andrzej Sebastian DUDA_2`,"TRZASKOWSKI","DUDA"),
+         maz_2 = ifelse(maz_2=="0","NIEOBECNY","OBECNY")) %>%
+  ggplot(aes(maz_2, fill=wygrany))+
+  geom_bar(position="fill")+
+  facet_wrap(vars(`Typ obszaru`))+
+  scale_y_continuous(labels = scales::percent)+
+  labs(x = "Obecność męża zaufania",
+       y = "Odsetek lokali wyborczych",
+       title = "Trzaskowski przeważał w komisjach pod nadzorem męża zaufania")
+```
+
+Co oznacza to zjawisko? - Na pewno jest jest ani zbiegiem okoliczności. Czy zatem ponad 8000 mężów zaufania nadużywało w jakiś sposób swojej obecności i razem z komisjami wyborczymi faworyzowali Rafała Trzaskowskiego? Oba stwierdzenia sa równie absurdalne, a odpowiedź prosta. To właśnie liberalny elektorat bardziej obawiał sie o uczciwość przeprowadzonych wyborów i na tych obszarach, gdzie jest go więcej niz konserwatywnego, zglaszało się więcej chętnych do zostania mężem zaufania w II turze wyborów. Właśnie dlatego tak bezrefleksyjne zawierzenie modelowi mogłoby prowadzić do błędnych wniosków. 
+
+```{r}
+typ_obszaru <- pull(distinct(do_modelu, `Typ obszaru`))[1:2]
+
+obszary <- list()
+
+for (x in 1:length(typ_obszaru)){
+  obszary[[x]] <- filter(wybory, `Typ obszaru` == typ_obszaru[x])
+}
+
+
+
+for (x in 1:length(obszary)){
+  if (x == 1){
+    obszary[[x]] <- obszary[[x]] %>%
+      group_by(Gmina) %>%
+      mutate(populacja = sum(populacja)) %>%
+      ungroup() %>%
+      mutate(kategoria = cut(populacja, breaks = c(0,2e+04, 1e+05, 5e+05,1e+07),
+        labels = c("do 20k","pow. 20k-100k","pow. 100k-500k","pow. 500k")),
+        region = paste0(Województwo,"-",kategoria))
+  }
+  if (x==2){
+    obszary[[x]] <- obszary[[x]] %>%
+      group_by(Gmina) %>%
+      mutate(populacja = sum(populacja)) %>%
+      ungroup() %>% 
+      mutate(kategoria = cut(populacja, breaks = c(0,4000,6000,8000,30000),
+        labels = c("do 4k", "pow. 4k-6k","pow. 6k-8k","pow. 8k")),
+        region = paste0(Województwo,"-",kategoria))
+  }
+
+}
+```
+
+```{r, refs_miasta}
+ref_miasta <- obszary[[1]] %>%
+  group_by(region) %>%
+  summarise(duda1 = median(`Andrzej Sebastian DUDA_1`),
+            duda2 = median(`Andrzej Sebastian DUDA_2`),
+            trzask1 = median(`Rafał Kazimierz TRZASKOWSKI_1`),
+            trzask2 = median(`Rafał Kazimierz TRZASKOWSKI_2`),
+            frek1 = median(Frekwencja_1),
+            frek2 = median(Frekwencja_2),
+            niew_x2_1 = median(x2_1),
+            niew_x0_1 = median(x0_1),
+            niew_x2_2 = median(x2_2),
+            niew_x0_2 = median(x0_2),
+            count = n()) %>% 
+  ungroup()
+
+odchylenie_miasta <- left_join(obszary[[1]], ref_miasta, by = c("region")) %>% 
+  select(klucz, Powiat, region, `Andrzej Sebastian DUDA_1`, duda1,
+         `Andrzej Sebastian DUDA_2`,duda2,
+         `Rafał Kazimierz TRZASKOWSKI_1`,trzask1,
+         `Rafał Kazimierz TRZASKOWSKI_2`,trzask2,
+         Frekwencja_1, frek1,
+         Frekwencja_2, frek2,
+         x2_1,niew_x2_1,
+         x0_1,niew_x0_1,
+         x2_2,niew_x2_2,
+         x0_2,niew_x0_2,
+         maz_1,maz_2) %>% 
+  mutate(roz_duda1 = `Andrzej Sebastian DUDA_1`-duda1,
+         roz_duda2 = `Andrzej Sebastian DUDA_2`-duda2,
+         roz_trzask1 = `Rafał Kazimierz TRZASKOWSKI_1` - trzask1,
+         roz_trzask2 = `Rafał Kazimierz TRZASKOWSKI_2` - trzask2,
+         roz_x2_1 = niew_x2_1 - x2_1,
+         roz_x0_1 = niew_x0_1 - x0_1,
+         roz_x2_2 = niew_x2_2 - x2_2,
+         roz_x0_2 = niew_x0_2 - x0_2,
+         roz_frek_1 = Frekwencja_1 - frek1,
+         roz_frek_2 = Frekwencja_2 - frek2)
+
+```
+
+```{r, refs_wsie}
+ref_wsie <- obszary[[2]] %>%
+  group_by(region) %>% 
+  summarise(duda1 = median(`Andrzej Sebastian DUDA_1`),
+            duda2 = median(`Andrzej Sebastian DUDA_2`),
+            trzask1 = median(`Rafał Kazimierz TRZASKOWSKI_1`),
+            trzask2 = median(`Rafał Kazimierz TRZASKOWSKI_2`),
+            frek1 = median(Frekwencja_1),
+            frek2 = median(Frekwencja_2),
+            niew_x2_1 = median(x2_1),
+            niew_x0_1 = median(x0_1),
+            niew_x2_2 = median(x2_2),
+            niew_x0_2 = median(x0_2),
+            count = n()) %>% 
+  ungroup() 
+
+
+odchylenie_wsie <- left_join(obszary[[2]], ref_wsie, by = c("region")) %>% 
+  select(klucz, Powiat, region, `Andrzej Sebastian DUDA_1`, duda1,
+         `Andrzej Sebastian DUDA_2`,duda2,
+         `Rafał Kazimierz TRZASKOWSKI_1`,trzask1,
+         `Rafał Kazimierz TRZASKOWSKI_2`,trzask2,
+         Frekwencja_1, frek1,
+         Frekwencja_2, frek2,
+         x2_1,niew_x2_1,
+         x0_1,niew_x0_1,
+         x2_2,niew_x2_2,
+         x0_2,niew_x0_2,
+         maz_1, maz_2) %>% 
+  mutate(roz_duda1 = `Andrzej Sebastian DUDA_1`-duda1,
+         roz_duda2 = `Andrzej Sebastian DUDA_2`-duda2,
+         roz_trzask1 = `Rafał Kazimierz TRZASKOWSKI_1` - trzask1,
+         roz_trzask2 = `Rafał Kazimierz TRZASKOWSKI_2` - trzask2,
+         roz_x2_1 = niew_x2_1-x2_1,
+         roz_x0_1 = niew_x0_1-x0_1,
+         roz_x2_2 = niew_x2_2-x2_2,
+         roz_x0_2 = niew_x0_2-x0_2,
+         roz_frek_1 = Frekwencja_1 - frek1,
+         roz_frek_2 = Frekwencja_2 - frek2)
+
+```
+
+### Porównanie rozkładłów głosów
+
+Jeżeli któryś z kandydatów byłby faworyzowany, to w I turze powinien uzyskiwać przeciętnie lepsze wyniki w komisjach bez męża zaufania niż w  podobnych komisjach odwiedzonych przez męża zaufania. Do tego potrzeba rozkładu referencyjnego, aby sprawdzić, czy wyniki danego kandydata z komisji bez męża zaufania odchylają sie w pewien znaczący sposób od normy z danego regionu. W tym celu wszystki badane komisje obwodowe zostaną pogrupowane wg kryterium typu obszaru, województwa oraz wielkości gminy, w którym sie znajdują.
+
+Wśród każdej grupy wyodrębnione zostaną dwa zbiory komisji - bez męża zaufania oraz z. W każdym z regionów porównane zostaną rozkłady głosów na kandydata z obu zbiorów komisji (sprawdzimy czy różnią się one istotnie od siebie). Do tego celu zostanie przeprowadzony test Kołmogorowa-Smirnowa o hipotezie zerowej, że oba rozkłady pochodzą z tej samej populacji. W każdym przypadku wynik testu powinien wskazać, że rozkłady są takie same, ponieważ de facto pochodzą z tego samego regionu, a zarazem tej samej populacji, różni je jedynie to, że w jednych był obecny mąż zaufania w I turze wyborów, a w innych nie. W pozostałych względach są podobne, bo pochodzą z tego samego typu obszaru, tego samego województwa i ze zbioru innych komisji z gmin o podobnej wielkości w liczbie mieszkańców. Jeśli zatem prawdopodobieństwo odrzucenia hipotezy zerowej będzie wystarczająco wysokie, powinno to prowadzić do skupienia się na tych podejrzanych grupach.
+
+#### Miasta
+Komisje miejskie zostały podzielone wg województw oraz wielkości gmin w których się znajdują - poniżej kompletna lista wszystkich grup łącznie z informacją ile komisji każda z nich zawiera:
+
+```{r}
+count(odchylenie_miasta,region) %>% 
+  as_tibble() %>% 
+  kable("html") %>% 
+  kable_styling("striped") %>% scroll_box(height = "200px", width = "375px") 
+```
+
+Przykładowo - komisje znajdujące się w Oławie będą należały do grupy dolnoślaskich komisji miejskich o wielkości od 20 do 100 tys. mieszkańców.
+
+
+Poniżej - sprawdzenie rozkładów głosów uzyskanych przez Andrzeja Dudę w pierwszej turze we wszystkich komisjach miejskich na Dolnym Śląsku znajdujących się z małych gminach (liczba mieszkańców do 20 tys.)
+
+```{r}
+odchylenie_miasta %>% 
+  mutate(maz_1 = fct_recode(maz_1,
+                            "NIEOBECNY W KOMISJI"="0",
+                            "OBECNY w KOMISJI" = "Other")) %>% 
+  filter(region=="dolnośląskie-do 20k") %>%
+  ggplot(aes(`Andrzej Sebastian DUDA_1`,fill=maz_1))+
+  geom_density(alpha=0.6)+
+  labs(title="Rozkłady głosów Dudy w miejskich komisjach dolnośląskich",
+       x = "Wyniki Andrzeja Dudy - tura 1",
+       fill = "Obeność meża zaufania")+
+  facet_wrap(vars(region))
+
+x <- filter(odchylenie_miasta,maz_1=="0")
+y <- filter(odchylenie_miasta,maz_1=="Other")
+ks.test(x$`Andrzej Sebastian DUDA_1`,y$`Andrzej Sebastian DUDA_1`)
+```
+
+Wiemy, że głosy zarówno z komisji bez mężów zaufania jak i z ich wizytą pochodzą z tej samej populacji. Test zwraca prawdopodobieństwo odbrzucenia hipotezy zerowej równe 0.08307, co oznacza, że z powszechnie przyjętą konwencją (<0.05) jest wartością zbyt wysoką,a by H0 odrzucić. 
+
+Pamiętajmy, że mamy do przetestowania `r nrow(count(odchylenie_miasta,region))` grup więc będziemy mieć do czynienia z **błędem wielokrotnego testowania**, co oznacza, że statystycznie rzecz biorąc, znajdzie się grupa, gdzie test zwróci na tle małe p-value, aby przyjąć hipotezę alternatywną, dlatego do otrzymanych wartości trzeba będzie podejść bardziej rygorystycznie niż przewiduje powszechna konwencja i zwracac uwage tylko na naprawdę bardzo niskie p-value.
+
+```{r}
+dist_0 <- list()
+dist_1 <- list()
+
+regiony <- unique(odchylenie_miasta$region)
+
+for(x in 1:length(regiony)){
+  dist_0[[x]] <- filter(odchylenie_miasta, region==regiony[x],
+                        maz_1=="0") %>% pull(`Andrzej Sebastian DUDA_1`)
+  
+  dist_1[[x]] <- filter(odchylenie_miasta, region==regiony[x],
+                        maz_1=="Other") %>% pull(`Andrzej Sebastian DUDA_1`)
+}
+
+dist_0 <- dist_0[-27]
+dist_1 <- dist_1[-27]
+regiony_bez_27 <- regiony[-27]
+test <- numeric()
+liczebnosc_0 <- numeric()
+liczebnosc_1 <- numeric()
+
+for(x in 1:length(regiony_bez_27)){
+  test[x] <- ks.test(dist_0[[x]],dist_1[[x]])$p.value
+  liczebnosc_0[x] <- length(dist_0[[x]])
+  liczebnosc_1[x] <- length(dist_1[[x]])
+}
+
+test_df <- tibble(regiony_bez_27,test,
+       liczebnosc_0,liczebnosc_1) %>%
+  mutate(n_komisji_w_regionie = rowSums(.[3:4]),
+         prop_1 = paste0(round(liczebnosc_1/n_komisji_w_regionie*100,2),"%"),
+    hipoteza = ifelse(test<0.05,"H1","H0")) %>% 
+  rename(Regiony = "regiony_bez_27",
+         `p-value` = "test",
+         `liczebność komisji bez męża zaufania` = "liczebnosc_0",
+         `liczebnosc komisji z mężem zaufania` = "liczebnosc_1",
+         `liczebność komisji total w regionie` = "n_komisji_w_regionie",
+         `odestek komisji z mężem zaufania` = "prop_1")
+
+test_df %>% 
+  as_tibble() %>% 
+  kable("html") %>% 
+  kable_styling("striped") %>% scroll_box(height = "600px") 
+```
+
+Choć w przypadku niektórych testów, uzyskana wartość p jest niższa od 0.05 to jednak musimy zważyć na wcześniej wspomniany błąd wielokrotnego testowania oraz to czy w danej grupie było wystarczająco dużo komisji z mężem zaufania w 1 turze, abysmy mogli traktować ten przykład jako reprezentatywny. Na podstawie testu Kołmogorowa-Smirnowa nie możemy powiedzieć, że były takie obszary, gdzie Andrzej Duda uzyskiwałby podejrzanie więcej głosów w komisjach bez męża zaufania niż w innych podobnych sobie komisjach wyborczych z tego samego regionu. 
+
+#### Wsie
+
+Schemat postępowania jest analogiczny, tylko dla grub obejmujących obszary wiejskie. Te zostały podzielone wielkościowo na: małe (do 4 tys. mieszkańców), średnie (4-6 tys.), duże (6-8tys.) oraz bardzo duże (pow. 8 tys.)
+
+```{r}
+dist_0 <- list()
+dist_1 <- list()
+
+regiony <- unique(odchylenie_wsie$region)
+
+for(x in 1:length(regiony)){
+  dist_0[[x]] <- filter(odchylenie_wsie, region==regiony[x],
+                        maz_1=="0") %>% pull(`Andrzej Sebastian DUDA_1`)
+  
+  dist_1[[x]] <- filter(odchylenie_wsie, region==regiony[x],
+                        maz_1=="Other") %>% pull(`Andrzej Sebastian DUDA_1`)
+}
+
+indx <- numeric()
+
+for(x in seq_along(dist_1)){
+  
+  if(length(dist_1[[x]])==0){
+    
+    indx[x] <- x
+    
+  } else {
+    
+    next
+  }
+}
+
+indx <- which(!is.na(indx))
+
+dist_0 <- dist_0[-indx]
+dist_1 <- dist_1[-indx]
+regiony <- regiony[-indx]
+test <- numeric()
+liczebnosc_0 <- numeric()
+liczebnosc_1 <- numeric()
+
+for(x in 1:length(regiony)){
+  test[x] <- ks.test(dist_0[[x]],dist_1[[x]])$p.value
+  liczebnosc_0[x] <- length(dist_0[[x]])
+  liczebnosc_1[x] <- length(dist_1[[x]])
+}
+
+test_df <- tibble(regiony,test,
+       liczebnosc_0,liczebnosc_1) %>%
+  mutate(n_komisji_w_regionie = rowSums(.[3:4]),
+         prop_1 = paste0(round(liczebnosc_1/n_komisji_w_regionie*100,2),"%"),
+    hipoteza = ifelse(test<0.05,"H1","H0")) %>% 
+  rename(Regiony = "regiony",
+         `p-value` = "test",
+         `liczebność komisji bez męża zaufania` = "liczebnosc_0",
+         `liczebnosc komisji z mężem zaufania` = "liczebnosc_1",
+         `liczebność komisji total w regionie` = "n_komisji_w_regionie",
+         `odestek komisji z mężem zaufania` = "prop_1")
+
+test_df %>% 
+  as_tibble() %>% 
+  kable("html") %>% 
+  kable_styling("striped") %>% scroll_box(height = "600px") 
+
+```
+
+W przypadku wsi także nie możemy z przekonaniem stwierdzić, że w jakiejkolwiek grupie rozkłady głosów istotnie się od siebie różniły. Dodatkowym problemem było to, że w wielu regionach nie było takich komisji, gdzie w pierwszej turze był mąż zaufania, więc nie było mozliwości przeprowadzenia testu. Bardzo mała liczba komisji z mężem zaufania w niemal każdym regionie wiejskim dodatkowo powoduje, że nawet gdybyśmy przyjęli w niektórzych przypadkach H1, to i tak nie moglibysmy takich obserwacji potraktowac jako reprezentatywnych a jedynie jako losowe wyniki. 
+
+### Hipoteza własna
+
+Zastosowane wyżej ujęcia analityczne wsparte metody statystyczne nie skłaniają ku odpowiedzi, że mąż zaufania miał wpływ na wynik omawianych wyborów. W kolejnym kroku można wysnuć własną hipotezę i ją zbadać. 
+
+Na podstawie intuicji oraz wiedzy można podejrzewać, co musieliby zrobić członkowie komisji chcący wpłynąć na wynik wyborów. Wobec nieobecności męża zaufania w pierwszej turze, jednym, co można byłoby zrobić w hipotetycznej sytuacji manipulacji rezultatem wyborów, byłoby:
+
+* użycie niewykorzystanych kart do głosowania i zakreślenia krzyżyka przy nazwisku faworyzowanego kandydata, co skutkowałoby sztucznym zwiększeniem frekwencji w takiej komisji
+
+* unieważnienie głosu oddanego na oponenta faworyzowanego kandydata poprzez postawienie drugiego znaku X, co przekłada się na zwiększenie odsetka głosów nieważnych w tej komisji, gdzie taki proceder miały mieć miejsce.
+
+Wobec powyższego – spośród wszystkich wybranych do badania komisji odwodowych szukamy takich:
+
+* gdzie w pierwszej turze nie było męża zaufania, a w drugiej już był
+
+* w których w pierwszej turze zebrano wyniki kandydatów, frekwencji oraz głosów nieważnych wyraźnie różniące się od wyników z **podobnych komisji**, natomiast w drugiej turze wyniki z tej komisji już nie odstawały od przeciętnych wartości z komisji o podobnych cechach.
+
+Wśród wszystkich wyselekcjonowanych w ten sposób komisjach poszukiwane są zależności – pomiędzy frekwencją a wynikiem kandydata oraz odsetkiem głosów nieważnych oraz wynikiem kandydata. Jeżeli w wybranych najbardziej skrajnych obserwacjach korelacja pomiędzy tymi wartościami okazałaby się wyraźna, to można byłoby domniemywać, że obecność męża zaufania mogłaby mieć wpływ na rezultat wyborów.
+
+Mogąc porównać się do **podobnych komisji** konieczne jest stworzenie  wartości referencyjnych - wyniku każdego kandydata, frekwencji oraz odsetka niewaznych głosów, czyli przeciętnych wartości ze wszystkich komisji danego regionu (tych samych, które były uzywane przy tescie Kołmogorowa-Smirnowa). 
+
+Poniżej macierz referencyjnych wyników procentach:
+
+* dla miast
+```{r}
+ref_miasta %>% 
+  kable("html") %>% 
+  kable_styling("striped") %>% scroll_box(height = "400px") 
+```
+
+*dla wsi
+```{r}
+ref_wsie %>% 
+  kable("html") %>% 
+  kable_styling("striped") %>% scroll_box(height = "400px") 
+
+```
+
+Wartości te przyłączymy do wyników z kazdej komisji - dzięki temu wiadomo będzie wyniki, frekwencja lub odsetek nieważnych głosów uzyskane w jakiej komisji najbardziej różniły się od przeciętnej z odpowiedniego dla niej regionu, czyli zbioru podobnych komisji.
+
+#### Miasta - sprawdzenie 1 części hipotezy
+
+```{r}
+x <- odchylenie_miasta %>%
+  filter(maz_1=="0",
+         maz_2=="Other") %>% 
+  select(klucz,Frekwencja_1,Frekwencja_2,frek1,frek2,roz_frek_1,roz_frek_2,roz_duda1,roz_trzask1,`Andrzej Sebastian DUDA_1`,`Rafał Kazimierz TRZASKOWSKI_1`) %>% 
+  arrange(desc(roz_frek_1)) %>% 
+  filter(Frekwencja_2<=frek2+2,
+         Frekwencja_2>=frek2-2) %>% 
+  slice(n=1:500) %>% 
+  pivot_longer(cols = c(`Andrzej Sebastian DUDA_1`,`Rafał Kazimierz TRZASKOWSKI_1`),
+               names_to = "kandydat",
+               values_to="wynik") %>% 
+  rename(`Nadzwyżka frekwencji w komisji nad średnią w pp.`="roz_frek_1",
+         `Wynik kandydata` = "wynik")
+```
+
+Weryfikujemy czy w takich komisjach, gdzie w pierwszej turze nie było męża zaufania, a w drugiej juz był, nadzwyżka frekwencji w 1 turze w komisji nad przeciętną z podobnych ma związek z wyższym poparciem któregoś z kandydatów. Wzięto 500 najbardziej skrajnych obserwacji pod względem frekwencji, przy czym w drugiej turze w tych samych komisjach frekwencja już nie różniła się wiele od przeciętnej. 
+
+
+```{r}
+x %>% 
+  ggplot(aes(`Nadzwyżka frekwencji w komisji nad średnią w pp.`,`Wynik kandydata`,col=kandydat))+
+  geom_jitter()+
+  geom_smooth(method = "lm",
+              se=FALSE)+
+    facet_wrap(vars(kandydat))+
+  theme(legend.position = "bottom")
+
+x %>% 
+  group_by(kandydat) %>% 
+  summarise(`zależność liniowa Perasona`=cor(`Nadzwyżka frekwencji w komisji nad średnią w pp.`,`Wynik kandydata`))
+```
+
+Podstawowe metryki zależności liniowej nie wskazują korelacji pomiędzy wynikiem kandydata, a większoną frekwencją w "podejrzanych" w pierwszej turze komisjach. W istocie, frekwencja była tam wyższa niz w podobnych komisjach, ale najprawdopodbniej wynikało to z przyczyn losowych. Nie ma związku pomiędzy nadwyżką frekwencji a wynikiem kandydata w najbardziej skrajnych pod kątem postawonej hipotezy komisjach obwodowych.
+
+#### Miasta - sprawdzenie 2 części hipotezy
+
+```{r}
+x <- odchylenie_miasta %>%
+  filter(maz_1=="0",
+         maz_2=="Other") %>% 
+  select(klucz,niew_x2_1,x2_1,niew_x2_2,x2_2,roz_x2_1,roz_x2_2,roz_duda1,roz_trzask1,`Andrzej Sebastian DUDA_1`,`Rafał Kazimierz TRZASKOWSKI_1`) %>% 
+  arrange(desc(roz_x2_1)) %>% 
+  filter(roz_x2_1>0,
+         niew_x2_2<=x2_2+0.05,
+         niew_x2_2>=x2_2-0.05) %>% 
+  slice(n=1:500) %>% 
+  pivot_longer(cols = c(`Andrzej Sebastian DUDA_1`,`Rafał Kazimierz TRZASKOWSKI_1`),
+               names_to ="kandydat",
+               values_to="wynik") %>% 
+    rename(`Nadzwyżka głosów nieważnych z powodu więcej niż jednego znaku "X" w komisji nad średnią w pp.`="roz_x2_1",
+         `Wynik kandydata` = "wynik")
+```
+
+Także nadwyżka głosów nieważnych powodu więcej niż jednego znaku "X" w komisji nad średnią w podobnych komisach nie ma związku z wyższym wynikiem któregos z kandydatów. Również jest to 500 najbardziej skrajnych przypadków, takich że w 1 turze było więcej głosów niewaznych w komisji niż przeciętnie, natomiast te same komisje pod tym względem były już bliższe średniej. Ta nadwyżka także musiała wynikac z przyczyn losowych ponieważ z punktu widzenia danych nie widać przełożenia na wynik kandydata.
+
+```{r}
+x %>% 
+  ggplot(aes(`Nadzwyżka głosów nieważnych z powodu więcej niż jednego znaku "X" w komisji nad średnią w pp.`,`Wynik kandydata`,col=kandydat))+
+  geom_jitter()+
+  geom_smooth(method = "lm",
+              se=FALSE)+
+  facet_wrap(vars(kandydat))+
+  theme(legend.position = "bottom")
+
+x %>% 
+  group_by(kandydat) %>% 
+  summarise(`zależność liniowa Perasona` = cor(`Nadzwyżka głosów nieważnych z powodu więcej niż jednego znaku "X" w komisji nad średnią w pp.`,`Wynik kandydata`))
+
+```
+
+#### Wsie - sprawdzenie 1 części hipotezy
+
+```{r}
+x <- odchylenie_wsie %>%
+  filter(maz_1=="0",
+         maz_2=="Other") %>% 
+  select(klucz,Frekwencja_1,Frekwencja_2,frek1,frek2,roz_frek_1,roz_frek_2,roz_duda1,roz_trzask1,`Andrzej Sebastian DUDA_1`,`Rafał Kazimierz TRZASKOWSKI_1`) %>% 
+  arrange(desc(roz_frek_1)) %>% 
+  filter(Frekwencja_2<=frek2+2,
+         Frekwencja_2>=frek2-2) %>% 
+  slice(n=1:500) %>% 
+  pivot_longer(cols = c(`Andrzej Sebastian DUDA_1`,`Rafał Kazimierz TRZASKOWSKI_1`),
+               names_to = "kandydat",
+               values_to="wynik") %>% 
+  rename(`Nadzwyżka frekwencji w komisji nad średnią w pp.`="roz_frek_1",
+         `Wynik kandydata` = "wynik")
+
+x %>% 
+  ggplot(aes(`Nadzwyżka frekwencji w komisji nad średnią w pp.`,`Wynik kandydata`,col=kandydat))+
+  geom_jitter()+
+  geom_smooth(method = "lm",
+              se=FALSE)+
+    facet_wrap(vars(kandydat))+
+  theme(legend.position = "bottom")
+
+x %>% 
+  group_by(kandydat) %>% 
+  summarise(`zależność liniowa Perasona`=cor(`Nadzwyżka frekwencji w komisji nad średnią w pp.`,`Wynik kandydata`))
+
+```
+
+#### Wsie - sprawdzenie 2 części hipotezy
+
+Po wyselekcjonowaniu zbioru zgodnie z hipotezą, pozostaje zbyt mało obserwacji,aby móc zbadać drugą część hipotezy na przykładzie obszarów wiejskich.  
+
+```{r, include=FALSE}
+x <- odchylenie_wsie %>%
+  filter(maz_1=="0",
+         maz_2=="Other") %>% 
+  select(klucz,niew_x2_1,x2_1,niew_x2_2,x2_2,roz_x2_1,roz_x2_2,roz_duda1,roz_trzask1,`Andrzej Sebastian DUDA_1`,`Rafał Kazimierz TRZASKOWSKI_1`) %>% 
+  arrange(desc(roz_x2_1)) %>% 
+  filter(roz_x2_1>0,
+         niew_x2_2<=x2_2+0.05,
+         niew_x2_2>=x2_2-0.05) %>% 
+  slice(n=1:500) %>% 
+  pivot_longer(cols = c(`Andrzej Sebastian DUDA_1`,`Rafał Kazimierz TRZASKOWSKI_1`),
+               names_to ="kandydat",
+               values_to="wynik") %>% 
+    rename(`Nadzwyżka głosów nieważnych z powodu więcej niż jednego znaku "X" w komisji nad średnią w pp.`="roz_x2_1",
+         `Wynik kandydata` = "wynik")
+
+x %>% 
+  ggplot(aes(`Nadzwyżka głosów nieważnych z powodu więcej niż jednego znaku "X" w komisji nad średnią w pp.`,`Wynik kandydata`,col=kandydat))+
+  geom_jitter()+
+  geom_smooth(method = "lm",
+              se=FALSE)+
+  facet_wrap(vars(kandydat))+
+  theme(legend.position = "bottom")
+
+x %>% 
+  group_by(kandydat) %>% 
+  summarise(`zależność liniowa Perasona` = cor(`Nadzwyżka głosów nieważnych z powodu więcej niż jednego znaku "X" w komisji nad średnią w pp.`,`Wynik kandydata`))
+```
+
+
+### Podsumowanie
+
+Dane wyborcze nie świadczą o tym, że mąż zaufania mógł mieć wpływ na jego wynik - nie przekonuje nas do tego ani test statystyczny, ani sprawdzenie celowo zamodelowenej hipotezy. Nie ma zatem podstaw, aby twierdzić, że obecność męża zaufania pozwaliła uniknąć jakichkolwiek nadużyć ze strony komisji w postawi faworyzowania któregoś z kandydatów. Jednakże z pewnością to, że mąż zaufania sprawuje kontrolę nad pracą komisji, powoduje poczucie rzetelnie i sprawiedliwie przeprowadzonego głosowania, dlatego powinno się propagować pełnienie tej funkcji społecznej.
+
+Analiza potwierdziła natomiast przypuszczenia, że tam, gdzie Rafał Trzaskowski cieszył się większym poparciem, tam też męzów zaufania było więcej. Wynika to z faktu, że liberalny elektorat obawiał się nierównie przeprowadzonych wyborów wobec chęci zmiany osoby stojącej na czele państwa, stąd ta bardzo wysoka mobilizacja.
